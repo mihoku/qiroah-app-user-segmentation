@@ -1,0 +1,664 @@
+---
+#title: "Assignment 3 ITI5145 - Qiroah App User Segmentation using Duolingo Growth Model"
+#author: "Reza Darmawan"
+#date: "Aug 2024"
+output:
+  html_document:
+    toc: no
+    df_print: paged
+  pdf_document:
+    number_sections: yes
+    toc: no
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{color}
+- \usepackage{multicol}
+- \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, fig.pos = 'H')
+```
+
+# Assignment 3 ITI5145
+
+### Qiroah App User Segmentation Using Duolingo Growth Model
+
+## A. Preparation
+
+### A.1. Libraries Used
+
+```{r, warning=FALSE, results='hide'}
+
+# create a function called install_and_load 
+# as the name implied, it serves as a loader of required libraries
+# and also installing them if it doesn't exist
+install_and_load <- function(package) {
+    
+  # if the package is not loaded, 
+  # hence the require function returns true  
+  if (!require(package, character.only = TRUE)) {
+    
+    # install package in case it is not yet installed
+    install.packages(package)
+    
+    # load the required library
+    library(package, character.only = TRUE)
+  }
+}
+
+required_packages<-c(
+  'dplyr', # basic dataframe or tibble functionality
+  'ggplot2', # to visualize the data (static)
+  'readr', # read the file
+  'tidyr', # package for data preprocessing
+  'stringr', # library for dealing with strings
+  'anytime', # to deal with unix epoch
+  'DT', #datatable library
+  'this.path' # for working directory setting
+)
+
+# Execute function to install and load packages 
+# listed in required_packages vector
+lapply(required_packages, install_and_load)
+```
+
+### A.2. Read Dataset
+
+```{r}
+
+# setting working directory to the path of this file----
+cur_dir = dirname(this.path())
+setwd(cur_dir)
+getwd()
+
+# Define string variable representing the dataset file name
+file_dataset<-'Raw_Data_9_columns.csv'
+
+text_dataset<-read_file(file.path(cur_dir,file_dataset))
+
+#text_dataset<-iconv(text_dataset, from = "ISO-8859-1", to = "UTF-8")
+
+# Use read_delim() function to read the dataset file
+qiroah_app_events_data<-read_csv(text_dataset,
+                                  
+                        # the separator is comma (',') and the first row is the column name 
+                        col_names=TRUE)
+
+nrow(qiroah_app_events_data)
+```
+
+### A.3. Explore Dataset
+
+```{r}
+# Get a glimpse of events in the dataset
+unique(qiroah_app_events_data$'Event Name')
+
+# create a function to extract learning events
+
+learning_events_extractor <- function(dataset){
+  
+  # Since we want to focus on the learning activity, the events will be filtered only based on 
+  # certain categories: "lihat_video_preview", "rekam_suara_user","dengar_suara_user", "dengar_suara_ustadz_feedback", "ulangi_soal", "lihat_video_feedback","materi_selesai"
+  
+  learning_events<-c("lihat_video_preview", "rekam_suara_user","dengar_suara_user", 
+                     "dengar_suara_ustadz_feedback", "ulangi_soal", "lihat_video_feedback","materi_selesai")
+  
+  # filter dataset to get only events related to learning
+  learning_events_subset <- dataset %>% 
+#  learning_events_subset <- dataset[, head(names(dataset), 3)] %>% 
+    subset(dataset$'Event Name' %in% learning_events) %>%
+    
+    # convert number in Time column into date
+    mutate(date_event = anydate(Time/1000)) %>%
+    mutate(date_event = as.Date(paste(format(date_event, '%d'),
+                              format(date_event, '%m'),
+                              format(date_event, '%Y'), sep='/'), format='%d/%m/%Y'))
+    
+  # rename distinct ID column
+  colnames(learning_events_subset)[colnames(learning_events_subset) == 'Distinct ID'] <- 'distinct_id'
+  
+  # return
+  return(learning_events_subset)
+  
+}
+
+
+qiroah_app_user_learning_events<-learning_events_extractor(qiroah_app_events_data)
+
+# view filtered data
+head(qiroah_app_user_learning_events) 
+     #%>% arrange(desc(date_event)) %>% select(date_event))[[1]]
+
+
+```
+
+### A.4. User Extraction
+
+```{r}
+# get distinct user's distinct_id to get a list of Qiroah App users
+qiroah_users<-data.frame(distinct_id=unique(qiroah_app_events_data$'Distinct ID'))
+
+# see the top rows
+head(qiroah_users)
+```
+
+## B. User Segmentation
+
+### B.1 Create a function for user segmentation
+
+```{r}
+
+# create user segmentation function based on Duolingo growth model
+user_segmentation <- function(user_vector, event_data, date_point_converted){
+  
+  # create summary of user event containing 2 recent activity date
+  user_event_summary<-event_data %>%
+    
+    group_by(across(c('distinct_id','date_event'))) %>%
+    
+    summarise(a=n()) %>%
+    
+    group_by(distinct_id) %>%
+    
+    # get 2 recent events date
+    summarise(most_recent_learning = max(date_event), 
+             previous_most_recent_learning =nth(date_event, 2, 
+                                                order_by = -as.numeric(date_event))) %>% 
+    
+
+    mutate(
+      
+      # add empty column for user segment
+      user_segment='',
+      
+      # add new column for user segmentation date
+      user_segmentation_date = date_point_converted)
+
+  # iterate over user vector
+  for (i in 1:nrow(user_event_summary)){
+    
+    if(!is.na(user_event_summary$previous_most_recent_learning[[i]])){
+      
+      # Current Users: learners active today, who were also active in the past week
+      
+      if(user_event_summary$most_recent_learning[[i]]==date_point_converted &
+         user_event_summary$previous_most_recent_learning[[i]]>=date_point_converted-7){
+        user_event_summary$user_segment[[i]]<-'Current Learning Users'
+      } 
+      
+      # Reactivated Users: learners active today, who were also active in the past month (but not the past week)
+      
+      else if(user_event_summary$most_recent_learning[[i]]==date_point_converted &
+         date_point_converted-30<=user_event_summary$previous_most_recent_learning[[i]] &
+         user_event_summary$previous_most_recent_learning[[i]]<=date_point_converted-7){
+        
+        user_event_summary$user_segment[[i]]<-'Reactivated Learning Users'
+        
+      }
+      
+      # Resurrected Users: learners active today, who were last active >30 days ago
+      
+      else if(user_event_summary$most_recent_learning[[i]]==date_point_converted &
+         user_event_summary$previous_most_recent_learning[[i]]<=date_point_converted-30){
+        user_event_summary$user_segment[[i]]<-'Resurrected Learning Users'
+      }
+      
+      # At Risk Weekly Active Users: learners who have been active within the past week, but not today
+      
+      else if(user_event_summary$most_recent_learning[[i]]!=date_point_converted &
+         user_event_summary$most_recent_learning[[i]]>=date_point_converted-7){
+        user_event_summary$user_segment[[i]]<-'At Risk Weekly Active Learning Users'
+      }
+      
+      # At Risk Monthly Active Users: learners who were active within the past month, but not the past week
+      
+      else if(user_event_summary$most_recent_learning[[i]]>=date_point_converted-30 &
+         user_event_summary$most_recent_learning[[i]]<=date_point_converted-7){
+        user_event_summary$user_segment[[i]]<-'At Risk Monthly Active Learning Users'
+      }
+      
+      # Dormant Users: learners who have been inactive for at least 30 days
+      
+      else if(user_event_summary$most_recent_learning[[i]]<=date_point_converted-30){
+        user_event_summary$user_segment[[i]]<-'Dormant Learning Users'
+      }
+      
+    }
+    
+    else {
+      
+      # New Users: learners who are experiencing Qiroah for the first time ever
+      
+      if(user_event_summary$most_recent_learning[[i]]==date_point_converted){
+        user_event_summary$user_segment[[i]]<-'New Learning Users'
+      }
+      
+      # At Risk Weekly Active Users: learners who have been active within the past week, but not today
+      
+      if(user_event_summary$most_recent_learning[[i]]!=date_point_converted &
+         user_event_summary$most_recent_learning[[i]]>=date_point_converted-7){
+        user_event_summary$user_segment[[i]]<-'At Risk Weekly Active Learning Users'
+      }
+      
+      # At Risk Monthly Active Users: learners who were active within the past month, but not the past week
+      
+      else if(user_event_summary$most_recent_learning[[i]]>=date_point_converted-30 &
+         user_event_summary$most_recent_learning[[i]]<=date_point_converted-7){
+        user_event_summary$user_segment[[i]]<-'At Risk Monthly Active Learning Users'
+      }
+      
+      # Dormant Users: learners who have been inactive for at least 30 days
+      
+      else if(user_event_summary$most_recent_learning[[i]]<=date_point_converted-30){
+        user_event_summary$user_segment[[i]]<-'Dormant Learning Users'
+      }
+      
+    }
+    
+  }
+  
+  return(user_event_summary)
+  
+}
+
+# function to execute user segmentation on a certain date range
+user_segmentation_range <- function(user_vector, event_data, date_point, day_backward=0){
+  
+  # convert date_point string to date
+  date_point_converted<-as.Date(date_point, format='%Y-%m-%d')
+  
+  #filter event data only for events with date less than or equal to date point defined 
+  event_data_filtered<-event_data %>% filter(date_event<=date_point_converted)
+  
+  # if the data is analyzed on user segmentation only for one day
+  if(day_backward==0){
+    
+    # execute user segmentation for one day period only
+    user_segmentation_result<-user_segmentation(user_vector,
+                                                event_data_filtered, 
+                                                date_point_converted) %>%
+      
+      # right join with user data
+      right_join(user_vector,by=c('distinct_id')) %>%
+      
+      # add Non-Learning user category if users have no learning activity
+      mutate_if(is.character,coalesce,'Non-Learning Users') %>%
+      
+      # add user segmentation date for users with no learning activity
+      mutate_at(c('user_segmentation_date'), function(x) date_point_converted)
+      #mutate_at(c('user_segmentation_date'), 
+       #         as.Date(format(date_point_converted,'%d/%m/%Y'),'%d/%m/%Y'))
+    
+    # export user segmentation result to csv
+    write.csv(user_segmentation_result,
+              paste0("user_segment_",
+                     format(date_point_converted, '%Y'),
+                     format(date_point_converted, '%m'),
+                     format(date_point_converted, '%d'),
+                     ".csv"), row.names = FALSE)
+    
+  }
+  
+  # if the data is analyzed on user segmentation for a certain range
+  else{
+    
+    # execute user segmentation for one day period only
+    user_segmentation_result<-user_segmentation(user_vector,
+                                                event_data_filtered, 
+                                                date_point_converted) %>%
+      
+      # right join with user data
+      right_join(user_vector,by=c('distinct_id')) %>%
+      
+      # add Non-Learning user category if users have no learning activity
+      mutate_if(is.character,coalesce,'Non-Learning Users') %>%
+      
+      # add user segmentation date for users with no learning activity
+      mutate_at(c('user_segmentation_date'), function(x) date_point_converted)
+      #mutate_at(c('user_segmentation_date'), 
+                #as.Date(format(date_point_converted,'%d/%m/%Y'),'%d/%m/%Y'))      
+    
+    # iterate user segmentation process on a given range of date
+    for(i in 1:day_backward){
+      
+      # re-filter the event data based on the new date range
+      event_data_refiltered<-event_data_filtered %>% filter(date_event<=date_point_converted-i)
+      
+      # execute user segmentation for one day period only
+      user_segmentation_result_b<-user_segmentation(user_vector,
+                                                    event_data_refiltered, 
+                                                    date_point_converted-i) %>%
+      
+        # right join with user data
+        right_join(user_vector,by=c('distinct_id')) %>%
+      
+        # add Non-Learning user category if users have no learning activity
+        mutate_if(is.character,coalesce,'Non-Learning Users') %>%
+
+        # add user segmentation date for users with no learning activity
+        mutate_at(c('user_segmentation_date'), function(x) date_point_converted-i)
+                # as.Date(format(date_point_converted-i,'%d/%m/%Y'),'%d/%m/%Y'))        
+              
+      # combine user segmentation dataframe
+      user_segmentation_result<-rbind(user_segmentation_result, user_segmentation_result_b)
+      
+    }
+    
+    # export user segmentation result to csv
+    write.csv(user_segmentation_result,
+              paste0("user_segment_",
+                     format(date_point_converted, '%Y'),
+                     format(date_point_converted, '%m'),
+                     format(date_point_converted, '%d'),
+                     "_to_",
+                     format(date_point_converted-day_backward, '%Y'),
+                     format(date_point_converted-day_backward, '%m'),
+                     format(date_point_converted-day_backward, '%d'),
+                     ".csv"), row.names = FALSE)
+    
+  }
+  
+  return(user_segmentation_result)
+  
+}
+```
+
+### B.2. Execute User Segmentation (e.g. for 7 days prior since 1 August 2024)
+
+```{r}
+
+qiroah_user_segmentation<-user_segmentation_range(qiroah_users,qiroah_app_user_learning_events, '2024-08-01',7) 
+```
+
+### B.3. User Segmentation Visualization (e.g. per 1 August 2024)
+
+```{r}
+
+user_segmentation_capture<-function(segmentation_data,capture_date){
+  
+  segmentation_data %>%
+  
+    # filter user segmentation data 
+    filter(user_segmentation_date==as.Date(capture_date,'%Y-%m-%d')) %>%
+    
+    # group by user segment
+    group_by(user_segment) %>%
+    
+    # count number of user per segment
+    summarise(count=n()) %>%
+    
+    # visualize in horizontal bar chart
+    ggplot() +
+    geom_col(aes(count, user_segment), fill = '#076fa2', width = 0.6) +
+    labs(title = "Qiroah App User Segmentation from Learning Activity",
+         subtitle=paste0("Cutoff Date: ",capture_date), 
+         y='User Segments',x='Number of Users')
+  
+}
+
+user_segmentation_capture(qiroah_user_segmentation,'2024-08-01')
+```
+
+```{r}
+# Use read_delim() function to read the dataset file
+qiroah_user_segmentation<-read_csv(file.path(cur_dir,'user_segment_20240801_to_20230802.csv'),
+                                  
+                        # the separator is comma (',') and the first row is the column name 
+                        col_names=TRUE)
+
+head(qiroah_user_segmentation)
+```
+
+### B.4 Create function to calculate user transition
+
+```{r}
+# this function will be used to calculate user retention
+calculate_user_retention<-function(user_segmentation_data){
+  
+  # get earliest date in user segmentation data
+  earliest_date<-min(user_segmentation_data$user_segmentation_date)
+  
+  # get latest date in user segmentation data
+  latest_date<-max(user_segmentation_data$user_segmentation_date)
+  
+  # check if sufficient amount of data provided
+  # in which the dataset should not only contain segmentation from one period
+  if(earliest_date==latest_date) {
+    
+    print("Insufficient amount of observation provided: the dataset only contains user segmentation in one period.")
+    
+    # return empty dataframe
+    return(data.frame(distinct_id=character(), 
+                      user_retention_period=as.Date(character()), 
+                      current_segmentation=character(), 
+                      previous_segmentation=character()))
+    
+  
+    } else { # proceed if dataset satisfies the criteria
+      # convert date point defined in parameter as Date
+      
+      # filter the data for the current analysis period
+      user_segment_data_current<-user_segmentation_data %>% filter(user_segmentation_date!=earliest_date) %>%
+        
+        # create a new column representing the current segmentation
+        mutate(current_segmentation=user_segment,
+               user_retention_period=user_segmentation_date)
+      
+      # filter the data for the previous analysis period
+      user_segment_data_previous<-user_segmentation_data %>% filter(user_segmentation_date!=latest_date)%>%
+        
+        # create a new column representing the previous date segmentation
+        mutate(previous_segmentation=user_segment,
+               user_retention_period=user_segmentation_date+1)
+      
+      # join current user segmentation data with previous user segmentation data
+      
+      user_retention_data<-user_segment_data_current %>%
+        inner_join(user_segment_data_previous, by=c('distinct_id','user_retention_period')) %>%
+        
+        # select relevant column
+        select(distinct_id, user_retention_period, current_segmentation, previous_segmentation)
+      
+      user_retention_data$transition<-paste(user_retention_data$previous_segmentation,user_retention_data$current_segmentation,sep='--')
+      
+      # export user retention result to csv
+      write.csv(user_retention_data,
+                paste0("user_retention_",
+                       format(latest_date, '%Y'),
+                       format(latest_date, '%m'),
+                       format(latest_date, '%d'),
+                       "_to_",
+                       format(earliest_date+1, '%Y'),
+                       format(earliest_date+1, '%m'),
+                       format(earliest_date+1, '%d'),
+                       ".csv"), row.names = FALSE)
+      
+      return(user_retention_data)
+      
+    }
+  }
+
+```
+
+### B.5. Execute User Transition Calculation (for 365 days prior since 1 August 2024)
+
+```{r}
+qiroah_user_retention<-calculate_user_retention(qiroah_user_segmentation)
+```
+
+```{r}
+unique(qiroah_user_retention$transition)
+```
+
+### B.6. Create function for user segment summarization and visualization
+
+```{r}
+
+# function for user segment summarization
+user_segment_summarization<-function(user_segment_data){
+  
+  # identify range of date
+  earliest_date<-min(user_segment_data$user_segmentation_date)
+  latest_date<-max(user_segment_data$user_segmentation_date)
+  
+  # group the segmentation data based on date and user segment
+  user_segment_data_summary<-user_segment_data %>% group_by(across(c(
+    user_segmentation_date,
+    user_segment
+    ))) %>%
+    
+    summarise(n_user=n())
+  
+  # export user retention result to csv
+  write.csv(user_segment_data_summary,
+            paste0("user_segmentation_summary_",
+                   format(latest_date, '%Y'),
+                   format(latest_date, '%m'),
+                   format(latest_date, '%d'),
+                   "_to_",
+                   format(earliest_date+1, '%Y'),
+                   format(earliest_date+1, '%m'),
+                   format(earliest_date+1, '%d'),
+                   ".csv"), row.names = FALSE)
+  
+  # return the data summary
+  return(user_segment_data_summary)
+}
+
+# function to visualize the trend of a certain user segment 
+user_segment_visualization<- function(user_segment_summary_data, selected_segment){
+  
+  # filter user segment data
+  filtered_segment<-user_segment_summary_data %>% filter(user_segment==selected_segment)
+  
+  # identify range of data
+  earliest_date<-format(min(filtered_segment$user_segmentation_date),'%Y-%m-%d')
+  latest_date<-format(max(filtered_segment$user_segmentation_date),'%Y-%m-%d')
+  
+  # visualize a line chart
+  filtered_segment %>%
+    ggplot(aes(x=user_segmentation_date, y=n_user)) +
+    geom_line(color="#69b3a2", size=1)+ 
+    labs(title = "Qiroah App Learning Activity User Segment Trend",
+         subtitle=paste0('User Segment: ',selected_segment,
+                         ', Period: ',earliest_date,' to ',latest_date),
+         y='Number of Users',x='Date')
+}
+
+
+
+```
+
+### B.7. Execute User Segment Summarization and visualization
+
+```{r}
+# execute user segment summary
+qiroah_user_segment_summary<-user_segment_summarization(qiroah_user_segmentation)
+
+# execute visualization in iteration of user segment
+for(i in unique(qiroah_user_segment_summary$user_segment)){
+  print(user_segment_visualization(qiroah_user_segment_summary,i))
+}
+```
+
+### B.8. Create a function for transition rate calculation and summarization
+
+```{r}
+
+# create a function to create a summarization of user retention
+retention_rate_summarization<-function(user_segment_summary, user_retention_data){
+  
+  # identify range of date
+  earliest_date<-min(user_retention_data$user_retention_period)
+  latest_date<-max(user_retention_data$user_retention_period)
+  
+  # create a summary based on period and transition
+  user_retention_summary<-user_retention_data %>% group_by(across(c(
+    user_retention_period, previous_segmentation, current_segmentation
+  ))) %>%
+    summarise(n_user=n())
+  
+  head(user_retention_summary)
+
+  # join user segment summary and user retention summary to get transition rate between segments
+  user_retention_rate_data<-user_segment_summary %>% 
+    
+    # prepare join key column
+    mutate(user_retention_period=user_segmentation_date+1,
+           previous_segmentation=user_segment,
+           previous_segment_count=n_user) %>%
+    
+    # select relevant column
+    select(user_retention_period,
+           previous_segmentation,
+           previous_segment_count) %>%
+    
+    # right join to take all row from user retention summary
+    right_join(user_retention_summary, by=c('user_retention_period','previous_segmentation')) %>%
+    
+    # select relevant columns
+    select(user_retention_period, 
+           previous_segmentation, 
+           current_segmentation,
+           n_user,previous_segment_count) %>%
+    
+    # calculate retention rate
+    mutate(rate_transition=100*n_user/previous_segment_count)
+    
+  # labelling the transition
+  user_retention_rate_data$transition<-paste(user_retention_rate_data$previous_segmentation,user_retention_rate_data$current_segmentation,sep='--')
+
+  # export user retention result to csv
+  write.csv(user_retention_rate_data,
+            paste0("user_retention_summary_",
+                   format(latest_date, '%Y'),
+                   format(latest_date, '%m'),
+                   format(latest_date, '%d'),
+                   "_to_",
+                   format(earliest_date+1, '%Y'),
+                   format(earliest_date+1, '%m'),
+                   format(earliest_date+1, '%d'),
+                   ".csv"), row.names = FALSE)
+  
+  # return the data summary
+  return(user_retention_rate_data)
+  
+}
+```
+
+```{r}
+qiroah_user_segment_transition_summary<-retention_rate_summarization(qiroah_user_segment_summary, qiroah_user_retention)
+
+head(qiroah_user_segment_transition_summary)
+
+```
+
+```{r}
+# function to visualize the trend of a certain user retention 
+user_retention_visualization<- function(user_retention_summary_data, selected_retention){
+  
+  # filter user segment data
+  filtered_retention<-user_retention_summary_data %>% filter(transition==selected_retention)
+  
+  # identify range of data
+  earliest_date<-format(min(filtered_retention$user_retention_period),'%Y-%m-%d')
+  latest_date<-format(max(filtered_retention$user_retention_period),'%Y-%m-%d')
+  
+  # visualize a line chart
+  filtered_retention %>%
+    ggplot(aes(x=user_retention_period, y=rate_transition)) +
+    geom_line(color="#69b3a2", size=1)+ 
+    labs(title = "Qiroah App Learning Activity User Retention Trend",
+         subtitle=paste0(selected_retention,
+                         ', Period: ',earliest_date,' to ',latest_date),
+         y='Rate',x='Date')
+}
+```
+
+```{r}
+# execute visualization in iteration of user retention segment
+for(i in unique(qiroah_user_segment_transition_summary$transition)){
+  print(user_retention_visualization(qiroah_user_segment_transition_summary,i))
+}
+```
